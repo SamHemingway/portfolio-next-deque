@@ -1,27 +1,96 @@
 name: Playwright Tests
-on:
-  push:
-    branches: [ main, master, sanity ]
-  pull_request:
-    branches: [ main, master, sanity ]
+on: deployment_status
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+# Cancel in-progress runs for PRs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    timeout-minutes: 60
+  debug:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: lts/*
-    - name: Install dependencies
-      run: npm install -g pnpm && pnpm install
-    - name: Install Playwright Browsers
-      run: pnpm exec playwright install --with-deps
-    - name: Run Playwright tests
-      run: pnpm exec playwright test
-    - uses: actions/upload-artifact@v4
-      if: ${{ !cancelled() }}
-      with:
-        name: playwright-report
-        path: playwright-report/
-        retention-days: 30
+      - name: Debug Event
+        env:
+          EVENT_CONTEXT: ${{ toJSON(github.event) }}
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Action: ${{ github.event.action }}"
+          echo "Deployment Status: ${{ github.event.deployment_status.state }}"
+          echo "Target URL: ${{ github.event.deployment_status.target_url }}"
+          echo "Environment: ${{ github.event.deployment.environment }}"
+          echo "Ref: ${{ github.event.deployment.ref }}"
+          echo "Full Event Context:"
+          echo "$EVENT_CONTEXT"
+
+  test:
+    needs: debug
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    if: |
+      github.event.action == 'created' &&
+      contains(github.event.deployment.environment, 'Preview')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.ref }}
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Setup project
+        run: |
+          echo "Setting up Vercel project..."
+          mkdir -p .vercel
+          echo "{\"projectId\":\"$VERCEL_PROJECT_ID\",\"orgId\":\"$VERCEL_ORG_ID\"}" > .vercel/project.json
+          cat .vercel/project.json
+
+      - name: Pull Vercel Environment Information
+        run: |
+          echo "Pulling Vercel environment information..."
+          vercel link --confirm --token=${{ secrets.VERCEL_TOKEN }}
+          vercel env pull --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm install -g pnpm && pnpm install
+      - name: Install Playwright Browsers
+        run: pnpm exec playwright install --with-deps
+      - name: Run Playwright tests
+        run: |
+          DEPLOY_URL="${{ github.event.deployment_status.target_url }}"
+          echo "Testing against deployment URL: $DEPLOY_URL"
+          echo "Using ref: ${{ github.event.deployment.ref }}"
+
+          PLAYWRIGHT_TEST_TIMEOUT=120000 pnpm exec playwright test \
+            --retries=2 \
+            --reporter=list
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ github.event.deployment_status.target_url }}
+          VERCEL_URL: ${{ github.event.deployment_status.target_url }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          NEXT_PUBLIC_SANITY_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_SANITY_PROJECT_ID }}
+          NEXT_PUBLIC_SANITY_DATASET: ${{ secrets.NEXT_PUBLIC_SANITY_DATASET }}
+          SANITY_API_READ_TOKEN: ${{ secrets.SANITY_API_READ_TOKEN }}
+          CI: true
+          DEBUG: pw:api*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+      - name: Report Status
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const script = require('./.github/workflows/report-status.js')
+            await script({github, context, core})
