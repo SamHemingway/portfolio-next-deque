@@ -2,6 +2,8 @@ name: Lint for accessibility issues
 
 on: [pull_request]
 
+# Note: The axe-linter may have issues with Next.js route groups (directories with parentheses).
+# If this causes problems, you may need to handle these files separately or use a different accessibility testing approach.
 jobs:
   build:
     runs-on: ubuntu-latest
